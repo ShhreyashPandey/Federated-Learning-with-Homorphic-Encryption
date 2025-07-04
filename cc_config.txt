@@ -1,0 +1,4 @@
+multiplicativeDepth=2
+scalingModSize=50
+batchSize=8
+preMode=INDCPA
