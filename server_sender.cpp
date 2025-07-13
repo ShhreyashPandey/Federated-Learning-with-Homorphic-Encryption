@@ -1,103 +1,93 @@
 #include "openfhe.h"
-#include "scheme/ckksrns/ckksrns-ser.h"
 #include "cryptocontext-ser.h"
+#include "scheme/ckksrns/ckksrns-ser.h"
+
+#include "serialization_utils.h"
+#include "curl_utils.h"
 
 #include <iostream>
 #include <fstream>
-#include <filesystem>
-#include <thread>
+#include <nlohmann/json.hpp>
 #include <map>
-#include <sstream>
+#include <vector>
 
 using namespace lbcrypto;
+using json = nlohmann::json;
 using namespace std;
 
-void wait_for_file(const string& filename) {
-    while (!filesystem::exists(filename)) {
-        cout << "[Server Sender] Waiting for file: " << filename << endl;
-        this_thread::sleep_for(chrono::seconds(1));
-    }
+// Load base64-encoded ciphertext from binary file
+string loadCiphertextAsBase64(const string& filename) {
+    Ciphertext<DCRTPoly> ct;
+    ifstream in(filename, ios::binary);
+    if (!in.is_open()) throw runtime_error("Failed to open " + filename);
+    Serial::Deserialize(ct, in, SerType::BINARY);
+    return SerializeCiphertextToBase64(ct);
 }
 
-// Parse key=value formatted metadata file
-map<string, string> parseMetadata(const string& filename) {
-    map<string, string> result;
-    ifstream file(filename);
-    string line;
-    while (getline(file, line)) {
-        auto pos = line.find('=');
-        if (pos != string::npos) {
-            string key = line.substr(0, pos);
-            string value = line.substr(pos + 1);
-            result[key] = value;
-        }
-    }
-    return result;
+// Helper to POST one result payload to server
+void postClientResult(int round, const string& clientId,
+                      const string& ct_sum_b64,
+                      const string& ct_prod_b64) {
+
+    json payload = {
+        {"round", round},
+        {"client_id", clientId},
+        {"results", {
+            {"sum", ct_sum_b64},
+            {"product", ct_prod_b64}
+        }},
+        {"model", "LinearRegression"},
+        {"version", "1.0"},
+        {"direction", "server_to_client"}
+    };
+
+    string response = HttpPostJson("http://localhost:8000/result", payload.dump());
+    cout << "[Server Sender] Result posted for " << clientId << ": " << response << endl;
+}
+
+int getCurrentRound() {
+    ifstream file("round_counter.txt");
+    if (!file.is_open()) throw runtime_error("Cannot open round_counter.txt");
+    int round;
+    file >> round;
+    return round;
 }
 
 int main() {
-    wait_for_file("cc.bin");
-    wait_for_file("encrypted_aggregated_weights.txt");
-    wait_for_file("client1_private.key");
+    try {
+        int round = getCurrentRound();
+        cout << "[Server Sender] Using round " << round << endl;
 
-    auto metadata = parseMetadata("encrypted_aggregated_weights.txt");
+        // Paths to encrypted files
+        map<string, string> files = {
+            {"client1_sum",        "sum_client1.ct"},
+            {"client1_product",    "product_client1.ct"},
+            {"client2_sum",        "sum_client2.ct"},
+            {"client2_product",    "product_client2.ct"}
+        };
 
-    string ctFile = metadata["encrypted_weights"];
-    if (ctFile.empty()) {
-        cerr << "[Server Sender] ❌ 'encrypted_weights' field missing in metadata file." << endl;
+        // Load base64 ciphertexts
+        map<string, string> base64s;
+        for (const auto& [key, path] : files) {
+            base64s[key] = loadCiphertextAsBase64(path);
+        }
+
+        // Post results for client1
+        postClientResult(round, "client1",
+                         base64s["client1_sum"],
+                         base64s["client1_product"]);
+
+        // Post results for client2
+        postClientResult(round, "client2",
+                         base64s["client2_sum"],
+                         base64s["client2_product"]);
+
+        cout << "-----------------------------------------------------\n";
+    } catch (const std::exception& e) {
+        cerr << "[Server Sender] Error: " << e.what() << endl;
+        cout << "-----------------------------------------------------\n";
         return 1;
     }
 
-    wait_for_file(ctFile);
-
-    // Load CryptoContext and keys
-    CryptoContext<DCRTPoly> cc;
-    ifstream ccStream("cc.bin", ios::binary);
-    Serial::Deserialize(cc, ccStream, SerType::BINARY);
-
-    PrivateKey<DCRTPoly> sk;
-    ifstream skStream("client1_private.key", ios::binary);
-    Serial::Deserialize(sk, skStream, SerType::BINARY);
-
-    // Load ciphertext
-    Ciphertext<DCRTPoly> ctSum;
-    ifstream ctIn(ctFile, ios::binary);
-    Serial::Deserialize(ctSum, ctIn, SerType::BINARY);
-
-    // Decrypt result
-    Plaintext ptResult;
-    cc->Decrypt(sk, ctSum, &ptResult);
-    ptResult->SetLength(1);
-    double output = ptResult->GetCKKSPackedValue()[0].real();
-
-    // Append to model_input.txt for reuse
-    wait_for_file("model_input.txt");
-    ifstream inFile("model_input.txt");
-    ofstream outFile("model_input_tmp.txt");
-    string line;
-    while (getline(inFile, line)) {
-        outFile << line << endl;
-    }
-    outFile << "output=" << output << endl;
-    outFile << "direction=client_to_model" << endl;
-    outFile.close();
-    inFile.close();
-
-    remove("model_input.txt");
-    rename("model_input_tmp.txt", "model_input.txt");
-
-    // Log the round to logs/ directory
-    string round = metadata["round"];
-    string logFile = "logs/round_" + round + "_output.txt";
-    filesystem::create_directory("logs");
-
-    ofstream log(logFile);
-    for (const auto& [k, v] : metadata) {
-        log << k << "=" << v << endl;
-    }
-    log << "output=" << output << endl;
-    log.close();
-
-    cout << "[Server Sender] ✅ Output appended to model_input.txt and saved to " << logFile << endl;
     return 0;
 }

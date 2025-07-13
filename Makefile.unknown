@@ -1,50 +1,67 @@
 CXX = g++
-CXXFLAGS = -std=c++17 -O3
+CXXFLAGS = -std=c++17 -I/home/shreya/libs/json-full/single_include
 
 INCLUDES = \
+  -I. \
   -I/usr/local/include \
   -I/usr/local/include/openfhe \
   -I/usr/local/include/openfhe/pke \
   -I/usr/local/include/openfhe/core \
-  -I/usr/local/include/openfhe/binfhe
+  -I/usr/local/include/openfhe/binfhe \
+  -I/home/shreya/libs/json-full/single_include \
 
 LIBS = \
   /usr/local/lib/libOPENFHEpke.so \
   /usr/local/lib/libOPENFHEcore.so \
   /usr/local/lib/libOPENFHEbinfhe.so \
-  -lntl -lgmp -lm
+  -lcurl -lpthread -lntl -lgmp -lm
 
-all: cc model_generator client1_sender client2_sender client1_rekey client2_rekey server_receiver server_sender client1_receiver client2_receiver
+OBJS = \
+  base64_utils.cpp \
+  curl_utils.cpp \
+  serialization_utils.cpp
 
-cc: cc.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) cc.cpp cc_registry.cpp -o cc $(LIBS)
+all: cc model_generator client1_sender client2_sender client1_rekey client2_rekey server_receiver server_sender client1_receiver client2_receiver api_server
 
-model_generator: model_generator.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) model_generator.cpp -o model_generator $(LIBS)
+cc: cc.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client1_sender: client1_sender.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client1_sender.cpp cc_registry.cpp -o client1_sender $(LIBS)
+model_generator: model_generator.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client2_sender: client2_sender.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client2_sender.cpp cc_registry.cpp -o client2_sender $(LIBS)
+client1_sender: client1_sender.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client1_rekey: client1_rekey.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client1_rekey.cpp cc_registry.cpp -o client1_rekey $(LIBS)
+client2_sender: client2_sender.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client2_rekey: client2_rekey.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client2_rekey.cpp cc_registry.cpp -o client2_rekey $(LIBS)
+client1_rekey: client1_rekey.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-server_receiver: server_receiver.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) server_receiver.cpp cc_registry.cpp -o server_receiver $(LIBS)
+client2_rekey: client2_rekey.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-server_sender: server_sender.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) server_sender.cpp cc_registry.cpp -o server_sender $(LIBS)
+server_receiver: server_receiver.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client1_receiver: client1_receiver.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client1_receiver.cpp cc_registry.cpp -o client1_receiver $(LIBS)
+server_sender: server_sender.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
 
-client2_receiver: client2_receiver.cpp cc_registry.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) client2_receiver.cpp cc_registry.cpp -o client2_receiver $(LIBS)
+client1_receiver: client1_receiver.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+client2_receiver: client2_receiver.cpp cc_registry.cpp $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@ $(LIBS)
+
+api_server: api_server.cpp rest_storage.cpp mongoose.c $(OBJS)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) \
+	-DMG_MAX_RECV_SIZE=104857600 \
+	-DMG_MAX_HTTP_REQUEST_SIZE=104857600 \
+	-DMG_MAX_UPLOAD_SIZE=104857600 \
+	$^ -o api_server $(LIBS)
+
 
 clean:
-	rm -f cc model_generator client*_sender client*_rekey client*_receiver client*_public.key client*_private.key server_sender server_receiver ciphertext*.ct cc.bin eval_*.key rekey_*.key product*.ct sum*.ct round_counter.txt encrypted_output.ct
+	rm -f cc model_generator client*_sender client*_rekey client*_receiver \
+          server_sender server_receiver api_server \
+          *.key *.ct *.bin *.log *.json logs/*.txt logs/*.json

@@ -1,112 +1,158 @@
 #include "openfhe.h"
-#include "scheme/ckksrns/ckksrns-ser.h"
 #include "cryptocontext-ser.h"
+#include "scheme/ckksrns/ckksrns-ser.h"
+
+#include "serialization_utils.h"
+#include "curl_utils.h"
+
 #include <iostream>
-#include <fstream>
+#include <nlohmann/json.hpp>
 #include <vector>
 #include <complex>
-#include <filesystem>
-#include <thread>
-#include <sstream>
-#include <map>
+#include <fstream>
+#include <limits>
 
 using namespace lbcrypto;
+using json = nlohmann::json;
 using namespace std;
 
-void wait_for_file(const string& filename) {
-    while (!filesystem::exists(filename)) {
-        cout << "[Client1] Waiting for file: " << filename << endl;
-        this_thread::sleep_for(chrono::seconds(1));
-    }
-}
-
-map<string, string> parseModelInput(const string& filename, vector<complex<double>>& input) {
-    ifstream file(filename);
-    string line;
-    map<string, string> fields;
-
-    while (getline(file, line)) {
-        auto pos = line.find('=');
-        if (pos == string::npos) continue;
-
-        string key = line.substr(0, pos);
-        string value = line.substr(pos + 1);
-
-        if (key == "input_vector") {
-            stringstream ss(value);
-            string val;
-            while (getline(ss, val, ',')) {
-                input.push_back(stod(val));
-            }
-        } else {
-            fields[key] = value;
-        }
-    }
-    return fields;
+int getCurrentRound() {
+    ifstream file("round_counter.txt");
+    if (!file.is_open()) throw runtime_error("Failed to open round_counter.txt");
+    int round;
+    file >> round;
+    file.close();
+    if (round <= 0) throw runtime_error("Invalid round number in round_counter.txt");
+    return round;
 }
 
 int main() {
-    wait_for_file("model_input.txt");
+    // STEP 0: Read Round Info
+    int round = getCurrentRound();
+    cout << "[Client1 Sender] Using round " << round << endl;
 
-    vector<complex<double>> input;
-    map<string, string> metadata = parseModelInput("model_input.txt", input);
-
-    if (input.empty()) {
-        cerr << "[Client1 Sender] No valid input_vector found in model_input.txt ❌" << endl;
+    // STEP 1: Get Input Vector
+    string url = "http://localhost:8000/input?round=" + to_string(round);
+    string raw = HttpGetJson(url);
+    if (raw.empty()) {
+        cerr << "Empty response from GET /input" << endl;
         return 1;
     }
 
+    json model_input;
+    try {
+        model_input = json::parse(raw);
+    } catch (const json::parse_error& e) {
+        cerr << "Failed to parse JSON from /input: " << e.what() << endl;
+        return 1;
+    }
+
+    cout << "[Debug] Full model_input JSON:\n" << model_input.dump(4) << endl;
+
+    if (!model_input.contains("input_vector") || !model_input["input_vector"].is_array()) {
+        cerr << "input_vector is missing or not an array in input JSON" << endl;
+        return 1;
+    }
+
+    // STEP 2: Load CryptoContext
     CryptoContext<DCRTPoly> cc;
     ifstream ccIn("cc.bin", ios::binary);
+    if (!ccIn.is_open()) {
+        cerr << "Failed to open cc.bin" << endl;
+        return 1;
+    }
     Serial::Deserialize(cc, ccIn, SerType::BINARY);
+    if (!cc || cc->GetEncodingParams() == nullptr) {
+        cerr << "CryptoContext is invalid after deserialization" << endl;
+        return 1;
+    }
 
+    size_t batchSize = cc->GetEncodingParams()->GetBatchSize();
+    cout << "[Debug] CKKS Batch Size = " << batchSize << endl;
+
+    //STEP 3: Validate and Parse Input
+    vector<complex<double>> input;
+    input.reserve(model_input["input_vector"].size());
+
+    for (const auto& val : model_input["input_vector"]) {
+        if (!val.is_number()) {
+            cerr << "input_vector contains non-numeric value." << endl;
+            return 1;
+        }
+        input.emplace_back(val.get<double>());
+    }
+
+    size_t inputSize = input.size();
+    cout << "[Debug] Parsed input_vector of size " << inputSize << ": [ ";
+    for (const auto& v : input) cout << v.real() << " ";
+    cout << "]" << endl;
+
+    if (inputSize == 0 || inputSize > batchSize) {
+        cerr << "Invalid input_vector size: " << inputSize << " (Batch size = " << batchSize << ")" << endl;
+        return 1;
+    }
+
+    // STEP 4: Key Generation
     auto keyPair = cc->KeyGen();
     cc->EvalMultKeyGen(keyPair.secretKey);
     cc->EvalSumKeyGen(keyPair.secretKey);
+    
+    ofstream skOut("client1_private.key", ios::binary);
+    if (!skOut.is_open()) {
+        cerr << "Failed to open file to save private key" << endl;
+        return 1;
+    }
+    Serial::Serialize(keyPair.secretKey, skOut, SerType::BINARY);
+    skOut.close();
+    cout << "[Client1 Sender] Private key saved to client1_private.key" << endl;
 
-    // Save keys
-    ofstream pubOut("client1_public.key", ios::binary);
-    Serial::Serialize(keyPair.publicKey, pubOut, SerType::BINARY);
-    pubOut.close();
 
-    ofstream privOut("client1_private.key", ios::binary);
-    Serial::Serialize(keyPair.secretKey, privOut, SerType::BINARY);
-    privOut.close();
+    //STEP 5: Encrypt Input
+    Plaintext pt;
+    Ciphertext<DCRTPoly> ct;
 
-    // Save EvalMultKey
-    ofstream evmkOut("eval_mult_1.key", ios::binary);
-    cc->SerializeEvalMultKey(evmkOut, SerType::BINARY, "");
-    evmkOut.close();
-
-    // Save EvalSumKey
-    ofstream evksOut("eval_sum_1.key", ios::binary);
-    cc->SerializeEvalSumKey(evksOut, SerType::BINARY);
-    evksOut.close();
-
-    // Encrypt input vector
-    Plaintext pt = cc->MakeCKKSPackedPlaintext(input);
-    pt->SetLength(input.size());
-    auto ct = cc->Encrypt(keyPair.publicKey, pt);
-
-    // Serialize ciphertext to binary file
-    ofstream ctOut("ciphertext1.ct", ios::binary);
-    Serial::Serialize(ct, ctOut, SerType::BINARY);
-    ctOut.close();
-
-    // ✅ Write metadata + ciphertext location to text file for server
-    ofstream metaOut("client1_to_server.txt");
-    if (!metaOut.is_open()) {
-        cerr << "[Client1 Sender] Failed to write client1_to_server.txt ❌" << endl;
+    try {
+        pt = cc->MakeCKKSPackedPlaintext(input);
+        pt->SetLength(inputSize);
+        ct = cc->Encrypt(keyPair.publicKey, pt);
+        cout << "[Debug] Encryption complete" << endl;
+    } catch (const exception& e) {
+        cerr << "[Error] During encryption: " << e.what() << endl;
         return 1;
     }
 
-    for (const auto& [key, value] : metadata) {
-        metaOut << key << "=" << value << endl;
+    // STEP 6: Serialize and POST
+    string ct_b64, pk_b64, evm_b64, evs_b64;
+    try {
+        ct_b64 = SerializeCiphertextToBase64(ct);
+        cout << "[Debug] Ciphertext base64 size: " << ct_b64.size() << " bytes" << endl;
+
+        pk_b64 = SerializePublicKeyToBase64(keyPair.publicKey);
+        evm_b64 = SerializeEvalMultKeyToBase64(cc);
+        evs_b64 = SerializeEvalSumKeyToBase64(cc);
+    } catch (const exception& e) {
+        cerr << "[Error] During serialization: " << e.what() << endl;
+        return 1;
     }
-    metaOut << "ciphertext=ciphertext1.ct" << endl;
 
-    metaOut.close();
+    json payload = {
+        {"client_id", "client1"},
+        {"round", round},
+        {"ciphertext", ct_b64},
+        {"public_key", pk_b64},
+        {"eval_mult_key", evm_b64},
+        {"eval_sum_key", evs_b64}
+    };
 
-    cout << "[Client1 Sender] ✅ Encrypted input_vector and wrote metadata" << endl;
+    try {
+        string response = HttpPostJson("http://localhost:8000/encrypted-data/ciphertext", payload.dump());
+        cout << "[Client1 Sender] POST response: " << response << endl;
+        cout << "-----------------------------------------------------\n";
+    } catch (const exception& e) {
+        cerr << "[Error] HTTP POST failed: " << e.what() << endl;
+        cout << "-----------------------------------------------------\n";
+        return 1;
+    }
+
     return 0;
 }

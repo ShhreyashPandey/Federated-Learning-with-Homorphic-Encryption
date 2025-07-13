@@ -1,4 +1,6 @@
 multiplicativeDepth=2
-scalingModSize=50
+scalingModSize=30
 batchSize=8
 preMode=INDCPA
+ringDim=2048
+rescaleTechnique=FIXEDMANUAL

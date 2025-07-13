@@ -55,5 +55,6 @@ int main() {
     Serial::Serialize(cc, ccOut, SerType::BINARY);
 
     cout << "[cc.cpp] CryptoContext loaded from config and saved to cc.bin ✅" << endl;
+    cout << "-----------------------------------------------------\n";
     return 0;
 }

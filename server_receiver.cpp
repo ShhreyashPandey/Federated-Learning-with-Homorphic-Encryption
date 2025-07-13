@@ -1,134 +1,135 @@
 #include "openfhe.h"
-#include "scheme/ckksrns/ckksrns-ser.h"
 #include "cryptocontext-ser.h"
+#include "scheme/ckksrns/ckksrns-ser.h"
+
+#include "serialization_utils.h"
+#include "curl_utils.h"
+#include "base64_utils.h"
 
 #include <iostream>
 #include <fstream>
+#include <nlohmann/json.hpp>
 #include <vector>
-#include <sstream>
-#include <string>
-#include <filesystem>
-#include <thread>
 #include <map>
+#include <complex>
 
 using namespace lbcrypto;
+using json = nlohmann::json;
 using namespace std;
 
-void wait_for_file(const string& filename) {
-    while (!filesystem::exists(filename)) {
-        cout << "[Server Receiver] Waiting for file: " << filename << endl;
-        this_thread::sleep_for(chrono::seconds(1));
-    }
+int getCurrentRound() {
+    ifstream file("round_counter.txt");
+    if (!file.is_open()) throw runtime_error("Failed to open round_counter.txt");
+    int round;
+    file >> round;
+    file.close();
+    if (round <= 0) throw runtime_error("Invalid round number in round_counter.txt");
+    return round;
 }
 
-// Parse metadata (model, version, round, etc.)
-map<string, string> parseMetadata(const string& filename) {
-    ifstream file(filename);
-    string line;
-    map<string, string> fields;
-
-    while (getline(file, line)) {
-        auto pos = line.find('=');
-        if (pos == string::npos) continue;
-
-        string key = line.substr(0, pos);
-        string value = line.substr(pos + 1);
-        fields[key] = value;
-    }
-    return fields;
-}
-
-// Just a demo linear regression weight initializer
 vector<complex<double>> getModelWeights(size_t dim) {
-    return vector<complex<double>>(dim, 0.5); // fixed weights
-}
-
-size_t getInputDim(CryptoContext<DCRTPoly> cc, Ciphertext<DCRTPoly> ct, const PrivateKey<DCRTPoly>& sk) {
-    Plaintext pt;
-    cc->Decrypt(sk, ct, &pt);
-    pt->SetLength(pt->GetLength());
-    return pt->GetLength();
+    return vector<complex<double>>(dim, 0.5);  // Fixed weights
 }
 
 int main() {
-    wait_for_file("model_input.txt");
-    auto metadata = parseMetadata("model_input.txt");
+    try {
+        int round = getCurrentRound();
+        cout << "[Server Receiver] \U0001f501 Using round " << round << endl;
 
-    // Load all prerequisites
-    wait_for_file("cc.bin");
-    wait_for_file("ciphertext1.ct");
-    wait_for_file("ciphertext2.ct");
-    wait_for_file("rekey_1_to_2.key");
-    wait_for_file("rekey_2_to_1.key");
-    wait_for_file("eval_mult_1.key");
-    wait_for_file("eval_mult_2.key");
-    wait_for_file("eval_sum_1.key");
-    wait_for_file("eval_sum_2.key");
-    wait_for_file("client1_private.key");
+        string url = "http://localhost:8000/encrypted-data?round=" + to_string(round);
+        json data = json::parse(HttpGetJson(url));
 
-    // Load CryptoContext
-    CryptoContext<DCRTPoly> cc;
-    ifstream ccIn("cc.bin", ios::binary);
-    Serial::Deserialize(cc, ccIn, SerType::BINARY);
+        auto ciphers = data["ciphertexts"];
+        auto rekeys = data["rekeys"];
 
-    // Load eval keys
-    ifstream evmk1("eval_mult_1.key", ios::binary); cc->DeserializeEvalMultKey(evmk1, SerType::BINARY); evmk1.close();
-    ifstream evmk2("eval_mult_2.key", ios::binary); cc->DeserializeEvalMultKey(evmk2, SerType::BINARY); evmk2.close();
-    ifstream evks1("eval_sum_1.key", ios::binary); cc->DeserializeEvalSumKey(evks1, SerType::BINARY); evks1.close();
-    ifstream evks2("eval_sum_2.key", ios::binary); cc->DeserializeEvalSumKey(evks2, SerType::BINARY); evks2.close();
+        if (ciphers.size() != 2 || rekeys.size() != 2) {
+            cerr << "[Server Receiver] Missing ciphertexts or rekeys" << endl;
+            return 1;
+        }
 
-    // Load ciphertexts
-    Ciphertext<DCRTPoly> ct1, ct2;
-    ifstream ct1In("ciphertext1.ct", ios::binary); Serial::Deserialize(ct1, ct1In, SerType::BINARY);
-    ifstream ct2In("ciphertext2.ct", ios::binary); Serial::Deserialize(ct2, ct2In, SerType::BINARY);
+        // Load context
+        CryptoContext<DCRTPoly> cc;
+        ifstream ccIn("cc.bin", ios::binary);
+        Serial::Deserialize(cc, ccIn, SerType::BINARY);
 
-    // Load rekey
-    EvalKey<DCRTPoly> rk12, rk21;
-    ifstream rk12In("rekey_1_to_2.key", ios::binary); Serial::Deserialize(rk12, rk12In, SerType::BINARY);
-    ifstream rk21In("rekey_2_to_1.key", ios::binary); Serial::Deserialize(rk21, rk21In, SerType::BINARY);
+        // Deserialize eval keys
+        for (const auto& c : ciphers) {
+            vector<uint8_t> evm_bytes = Base64Decode(c["eval_mult_key"]);
+            stringstream evm_stream(string(evm_bytes.begin(), evm_bytes.end()));
+            cc->DeserializeEvalMultKey(evm_stream, SerType::BINARY);
 
-    // Re-encrypt for cross-client operations
-    auto ct1_to_2 = cc->ReEncrypt(ct1, rk12);
-    auto ct2_to_1 = cc->ReEncrypt(ct2, rk21);
+            vector<uint8_t> evs_bytes = Base64Decode(c["eval_sum_key"]);
+            stringstream evs_stream(string(evs_bytes.begin(), evs_bytes.end()));
+            cc->DeserializeEvalSumKey(evs_stream, SerType::BINARY);
+        }
 
-    // Add + Mult
-    auto sum1 = cc->EvalAdd(ct1, ct2_to_1);
-    auto prod1 = cc->EvalMult(ct1, ct2_to_1); cc->RescaleInPlace(prod1);
-    auto sum2 = cc->EvalAdd(ct1_to_2, ct2);
-    auto prod2 = cc->EvalMult(ct1_to_2, ct2); cc->RescaleInPlace(prod2);
+        // Deserialize rekeys
+        map<string, EvalKey<DCRTPoly>> rekeyMap;
+        for (const auto& rk : rekeys) {
+            string key = rk["rekey_from"].get<string>() + "_to_" + rk["rekey_to"].get<string>();
+            vector<uint8_t> rk_bytes = Base64Decode(rk["rekey"]);
+            stringstream rk_stream(string(rk_bytes.begin(), rk_bytes.end()));
+            EvalKey<DCRTPoly> rk_obj;
+            Serial::Deserialize(rk_obj, rk_stream, SerType::BINARY);
+            rekeyMap[key] = rk_obj;
+        }
 
-    Serial::SerializeToFile("sum_to_1.ct", sum1, SerType::BINARY);
-    Serial::SerializeToFile("product_to_1.ct", prod1, SerType::BINARY);
-    Serial::SerializeToFile("sum.ct", sum2, SerType::BINARY);
-    Serial::SerializeToFile("product.ct", prod2, SerType::BINARY);
+        // Ciphertext loading
+        Ciphertext<DCRTPoly> ct1 = DeserializeCiphertextFromBase64(ciphers[0]["ciphertext"]);
+        Ciphertext<DCRTPoly> ct2 = DeserializeCiphertextFromBase64(ciphers[1]["ciphertext"]);
 
-    // Inference-like operation (simulate secure model application)
-    PrivateKey<DCRTPoly> sk;
-    ifstream skStream("client1_private.key", ios::binary); Serial::Deserialize(sk, skStream, SerType::BINARY);
+        // ReEncrypt to common keyspace (client1)
+        Ciphertext<DCRTPoly> ct2_to_1 = cc->ReEncrypt(ct2, rekeyMap["client2_to_client1"]);
 
-    size_t dim = getInputDim(cc, ct1, sk);
-    auto weights = getModelWeights(dim);
-    Plaintext ptWeights = cc->MakeCKKSPackedPlaintext(weights);
-    ptWeights->SetLength(dim);
+        // Homomorphic Ops
+        auto sum = cc->EvalAdd(ct1, ct2_to_1);
+        auto product = cc->EvalMult(ct1, ct2_to_1);
+        cc->RescaleInPlace(product);
 
-    auto ctWeighted = cc->EvalMult(ct1, ptWeights);
-    cc->RescaleInPlace(ctWeighted);
-    auto ctSum = cc->EvalSum(ctWeighted, dim);
+        // Simulate Model Inference
+        Plaintext ptTmp;
+        PrivateKey<DCRTPoly> sk;
+        ifstream skStream("client1_private.key", ios::binary);
+        Serial::Deserialize(sk, skStream, SerType::BINARY);
+        cc->Decrypt(sk, ct1, &ptTmp);
+        ptTmp->SetLength(ptTmp->GetLength());
+        size_t dim = ptTmp->GetLength();
 
-    // Save the final encrypted output
-    ofstream out("encrypted_aggregated_weights.ct", ios::binary);
-    Serial::Serialize(ctSum, out, SerType::BINARY);
-    out.close();
+        auto weights = getModelWeights(dim);
+        auto ptWeights = cc->MakeCKKSPackedPlaintext(weights);
+        auto weighted = cc->EvalMult(ct1, ptWeights);
+        cc->RescaleInPlace(weighted);
+        auto inference = cc->EvalSum(weighted, dim);
 
-    // Write accompanying metadata
-    ofstream metaOut("encrypted_aggregated_weights.txt");
-    for (const auto& [key, value] : metadata) {
-        metaOut << key << "=" << value << endl;
+        // Re-encrypt results for client2
+        auto sum_for_c2 = cc->ReEncrypt(sum, rekeyMap["client1_to_client2"]);
+        auto prod_for_c2 = cc->ReEncrypt(product, rekeyMap["client1_to_client2"]);
+        auto inf_for_c2  = cc->ReEncrypt(inference, rekeyMap["client1_to_client2"]);
+
+        // Save all results
+        // For Client 1
+        std::ofstream sumOut1("sum_client1.ct", std::ios::binary);
+        Serial::Serialize(sum, sumOut1, SerType::BINARY);
+
+        std::ofstream productOut1("product_client1.ct", std::ios::binary);
+        Serial::Serialize(product, productOut1, SerType::BINARY);
+
+        // For Client 2
+        std::ofstream sumOut2("sum_client2.ct", std::ios::binary);
+        Serial::Serialize(sum_for_c2, sumOut2, SerType::BINARY);
+
+        std::ofstream productOut2("product_client2.ct", std::ios::binary);
+        Serial::Serialize(prod_for_c2, productOut2, SerType::BINARY);
+
+
+        cout << "[Server Receiver] Computation complete and encrypted results saved for both clients." << endl;
+        cout << "-----------------------------------------------------\n";
+
+    } catch (const std::exception& e) {
+        cerr << "[Server Receiver] Error: " << e.what() << endl;
+        cout << "-----------------------------------------------------\n";
+        return 1;
     }
-    metaOut << "encrypted_weights=encrypted_aggregated_weights.ct" << endl;
-    metaOut << "direction=server_to_client" << endl;
-    metaOut.close();
 
-    cout << "[Server Receiver] ✅ Computation complete. Result saved.\n";
     return 0;
 }
