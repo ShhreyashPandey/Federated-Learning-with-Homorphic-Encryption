@@ -1,4 +1,3 @@
-// cc_registry.cpp
 #include "openfhe.h"
 #include "cryptocontext-ser.h"
 #include "pke/key/key-ser.h"

@@ -1,35 +1,98 @@
 #!/bin/bash
 
-echo 1 > round_counter.txt
-MAX_ROUNDS=$(grep "rounds=" loop_config.txt | cut -d'=' -f2)
-echo "Configured to run $MAX_ROUNDS round(s)."
+set -e
+set -o pipefail
 
+MAX_ROUNDS=$(grep -E "^rounds=" loop_config.txt | head -n1 | cut -d'=' -f2 | tr -d '[:space:]')
+echo "🔁 Configured to run $MAX_ROUNDS round(s)."
+
+# Initial Setup (Run once before federated rounds)
+echo "🚀 Initial setup: generating CryptoContext..."
+./cc
+
+echo "🔑 Generating client1 keys..."
+./client1_keygen
+
+echo "🔑 Generating client2 keys..."
+./client2_keygen
+
+echo "🔐 Generating client1 re-encryption key..."
+./client1_rekeygen
+
+echo "🔐 Generating client2 re-encryption key..."
+./client2_rekeygen
+
+echo "✅ Initial setup done."
+
+# Initialize round counter
+echo 1 > round_counter.txt
+
+# Activate Python environment once
+source venv/bin/activate
+
+# Main federated learning rounds
 while true; do
     CURRENT_ROUND=$(cat round_counter.txt)
     if [ "$CURRENT_ROUND" -gt "$MAX_ROUNDS" ]; then
-        echo "All $MAX_ROUNDS round(s) completed."
+        echo "✅ All $MAX_ROUNDS round(s) completed."
         break
     fi
 
-    echo "-----------------------------------------------------------------------------------------"
-    echo "Starting round $CURRENT_ROUND..."
+    echo "-----------------------------------------------------------------------------------"
+    echo "🔄 Starting round $CURRENT_ROUND..."
+    ROUND_START=$(date +%s)
 
-    ./model_generator || { echo "❌ model_generator failed. Exiting."; exit 1; }
-    ./cc || { echo "❌ cc failed. Exiting."; exit 1; }
+    # ---- CLIENT 1 ----
+    echo "🟦 [Client 1] Training round $CURRENT_ROUND..."
+    if [ "$CURRENT_ROUND" -eq "1" ]; then
+        python3 client1_train.py client1_data/data1.csv client1_data/model.pkl client1_data/wc.json
+    else
+        python3 client1_train.py client1_data/data1.csv client1_data/model.pkl client1_data/wc.json client1_data/agg_wc.json
+    fi
 
-    ./client1_sender || { echo "❌ client1_sender failed. Exiting."; exit 1; }
-    ./client2_sender || { echo "❌ client2_sender failed. Exiting."; exit 1; }
+    echo "🟦 [Client 1] Encrypting params..."
+    ./client1_encrypt
 
-    ./client1_rekey || { echo "❌ client1_rekey failed. Exiting."; exit 1; }
-    ./client2_rekey || { echo "❌ client2_rekey failed. Exiting."; exit 1; }
+    # ---- CLIENT 2 ----
+    echo "🟧 [Client 2] Training round $CURRENT_ROUND..."
+    if [ "$CURRENT_ROUND" -eq "1" ]; then
+        python3 client2_train.py client2_data/data2.csv client2_data/model.pkl client2_data/wc.json
+    else
+        python3 client2_train.py client2_data/data2.csv client2_data/model.pkl client2_data/wc.json client2_data/agg_wc.json
+    fi
 
-    ./server_receiver || { echo "❌ server_receiver failed. Exiting."; exit 1; }
-    ./server_sender   || { echo "❌ server_sender failed. Exiting."; exit 1; }
+    echo "🟧 [Client 2] Encrypting params..."
+    ./client2_encrypt
 
-    ./client1_receiver || { echo "❌ client1_receiver failed. Exiting."; exit 1; }
-    ./client2_receiver || { echo "❌ client2_receiver failed. Exiting."; exit 1; }
+    # ---- SERVER AGGREGATION ----
+    echo "🟩 [SERVER] Performing homomorphic aggregation..."
+    ./operations
 
+    # ---- CLIENT 1: DECRYPT AGGREGATED PARAMS ----
+    echo "🟦 [Client 1] Decrypting aggregated params..."
+    ./client1_decrypt
+
+    # ---- CLIENT 2: DECRYPT AGGREGATED PARAMS ----
+    echo "🟧 [Client 2] Decrypting aggregated params..."
+    ./client2_decrypt
+
+    # ---- CLIENT 1: TEST & POST ACCURACY ----
+    echo "🟦 [Client 1] Testing and posting accuracy..."
+    python3 client1_test.py client1_data/test1.csv client1_data/model.pkl client1_data/accuracy.json http://localhost:8000/c2s/result
+
+    # ---- CLIENT 2: TEST & POST ACCURACY ----
+    echo "🟧 [Client 2] Testing and posting accuracy..."
+    python3 client2_test.py client2_data/test2.csv client2_data/model.pkl client2_data/accuracy.json http://localhost:8000/c2s/result
+    
+    ROUND_END=$(date +%s)
+    ROUND_TIME=$((ROUND_END - ROUND_START))
+    echo "$CURRENT_ROUND,$ROUND_TIME" >> timing_rounds.csv
+
+    # ---- increment round ----
     echo $((CURRENT_ROUND + 1)) > round_counter.txt
-
     sleep 1
 done
+
+deactivate
+
+echo "🎉 Federated rounds complete. Check logs and server for results."

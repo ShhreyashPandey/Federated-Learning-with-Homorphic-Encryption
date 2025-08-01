@@ -12,7 +12,7 @@
 
 using namespace lbcrypto;
 
-//Ciphertext
+// Ciphertext
 std::string SerializeCiphertextToBase64(const Ciphertext<DCRTPoly>& ct) {
     std::ostringstream oss;
     Serial::Serialize(ct, oss, SerType::BINARY);
@@ -20,7 +20,7 @@ std::string SerializeCiphertextToBase64(const Ciphertext<DCRTPoly>& ct) {
 
     std::cout << "[Debug] Raw ciphertext byte size = " << bin.size() << std::endl;
     if (bin.size() > 5 * 1024 * 1024) {
-        throw std::runtime_error("Ciphertext too large — likely corruption or serialization error");
+        throw std::runtime_error("❌ Ciphertext too large — likely corruption or serialization error");
     }
 
     std::vector<uint8_t> byteData;
@@ -41,7 +41,7 @@ Ciphertext<DCRTPoly> DeserializeCiphertextFromBase64(const std::string& base64) 
     return ct;
 }
 
-//Public Key
+// Public Key 
 std::string SerializePublicKeyToBase64(const PublicKey<DCRTPoly>& pk) {
     std::stringstream ss;
     Serial::Serialize(pk, ss, SerType::BINARY);
@@ -62,7 +62,7 @@ PublicKey<DCRTPoly> DeserializePublicKeyFromBase64(const std::string& base64) {
     return pk;
 }
 
-//Private Key
+// Private Key
 std::string SerializePrivateKeyToBase64(const PrivateKey<DCRTPoly>& sk) {
     std::stringstream ss;
     Serial::Serialize(sk, ss, SerType::BINARY);
@@ -83,7 +83,7 @@ PrivateKey<DCRTPoly> DeserializePrivateKeyFromBase64(const std::string& base64) 
     return sk;
 }
 
-//ReKey
+// ReKey
 std::string SerializeEvalKeyToBase64(const EvalKey<DCRTPoly>& rk) {
     std::stringstream ss;
     Serial::Serialize(rk, ss, SerType::BINARY);
@@ -126,3 +126,28 @@ std::string SerializeEvalSumKeyToBase64(const CryptoContext<DCRTPoly>& cc) {
     for (char ch : bin) byteData.push_back(static_cast<uint8_t>(ch));
     return Base64Encode(byteData);
 }
+
+
+// Serialize a vector of Ciphertext<DCRTPoly> to Base64 string
+std::string SerializeCiphertextVectorToBase64(const std::vector<Ciphertext<DCRTPoly>>& cts) {
+    std::stringstream ss;
+    Serial::Serialize(cts, ss, SerType::BINARY);
+    std::string bin = ss.str();
+
+    std::vector<uint8_t> byteData;
+    byteData.reserve(bin.size());
+    for (char ch : bin) byteData.push_back(static_cast<uint8_t>(ch));
+    return Base64Encode(byteData);
+}
+
+// Deserialize a Base64 string to vector of Ciphertext<DCRTPoly>
+std::vector<Ciphertext<DCRTPoly>> DeserializeCiphertextVectorFromBase64(const std::string& base64) {
+    std::vector<uint8_t> decoded = Base64Decode(base64);
+    std::string decodedStr(decoded.begin(), decoded.end());
+    std::stringstream ss(decodedStr);
+    std::vector<Ciphertext<DCRTPoly>> cts;
+    Serial::Deserialize(cts, ss, SerType::BINARY);
+    return cts;
+}
+
+
