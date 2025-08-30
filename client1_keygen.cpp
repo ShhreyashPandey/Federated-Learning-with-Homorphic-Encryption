@@ -29,27 +29,27 @@ int main() {
         cc->EvalMultKeyGen(privkey);
         cc->EvalSumKeyGen(privkey);
 
-        // Save public key locally
+        // Save keys locally
         std::ofstream pkOut("client1_data/client1_public.key", std::ios::binary);
         if (!pkOut.is_open()) {
-            std::cerr << "Unable to write public key" << std::endl;
+            std::cerr << "Unable to write client1 public key" << std::endl;
             return 1;
         }
         Serial::Serialize(pubkey, pkOut, SerType::BINARY);
         pkOut.close();
 
-        std::string pk_b64 = SerializePublicKeyToBase64(pubkey);
-        std::string evm_b64 = SerializeEvalMultKeyToBase64(cc);
-        std::string evs_b64 = SerializeEvalSumKeyToBase64(cc);
-
-        // Save private key locally
         std::ofstream skOut("client1_data/client1_private.key", std::ios::binary);
         if (!skOut.is_open()) {
-            std::cerr << "Unable to write private key" << std::endl;
+            std::cerr << "Unable to write client1 private key" << std::endl;
             return 1;
         }
         Serial::Serialize(privkey, skOut, SerType::BINARY);
         skOut.close();
+
+        // Serialize keys to Base64 for posting
+        std::string pk_b64 = SerializePublicKeyToBase64(pubkey);
+        std::string evm_b64 = SerializeEvalMultKeyToBase64(cc);
+        std::string evs_b64 = SerializeEvalSumKeyToBase64(cc);
 
         json payload;
         payload["client_id"] = "client1";
@@ -58,11 +58,10 @@ int main() {
         payload["eval_sum_key"] = evs_b64;
 
         auto response = HttpPostJson("http://localhost:8000/c2s/public_key", payload.dump());
-
         std::cout << "Public and eval keys posted, server response: " << response << std::endl;
 
-    } catch (const std::exception &e) {
-        std::cerr << "Exception: " << e.what() << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "Exception in client1_keygen: " << e.what() << std::endl;
         return 1;
     }
 

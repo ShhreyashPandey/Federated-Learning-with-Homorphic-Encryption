@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <cstdint>
 
-
 static const std::string base64_chars =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "abcdefghijklmnopqrstuvwxyz"
@@ -103,3 +102,4 @@ std::vector<uint8_t> Base64Decode(const std::string& encoded_string) {
 
     return ret;
 }
+

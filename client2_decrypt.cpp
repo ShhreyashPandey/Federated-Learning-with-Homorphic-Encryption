@@ -1,13 +1,20 @@
+#include "serialization_utils.h"
+#include "curl_utils.h"
+#include "base64_utils.h"
+
 #include "openfhe.h"
+#include "cryptocontext.h"
 #include "cryptocontext-ser.h"
 #include "pke/key/key-ser.h"
-#include "base64_utils.h"
-#include "curl_utils.h"
+#include "pke/ciphertext.h"
 
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
+#include <complex>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 
 using namespace lbcrypto;
 using json = nlohmann::json;
@@ -24,17 +31,17 @@ int main() {
         Serial::Deserialize(cc, ccFile, SerType::BINARY);
         ccFile.close();
 
-        // Load private key
+        // Load private key of client2
         PrivateKey<DCRTPoly> privKey;
         std::ifstream skFile("client2_data/client2_private.key", std::ios::binary);
         if (!skFile) {
-            std::cerr << "[c2_decrypt] ERROR: could not open private key\n";
+            std::cerr << "[c2_decrypt] ERROR: could not open client2_private.key\n";
             return 1;
         }
         Serial::Deserialize(privKey, skFile, SerType::BINARY);
         skFile.close();
 
-        // Load round number
+        // Get current round number
         std::ifstream roundFile("round_counter.txt");
         if (!roundFile) {
             std::cerr << "[c2_decrypt] ERROR: could not read round_counter.txt\n";
@@ -44,40 +51,117 @@ int main() {
         roundFile >> roundnum;
         roundFile.close();
 
-        // Get aggregated encrypted params from server
+        // Fetch aggregated encrypted params from server
         std::string url = "http://localhost:8000/s2c/agg_params?client_id=client2&round=" + std::to_string(roundnum);
         std::string response = HttpGetJson(url);
+
+        // Log communication download size (response size in bytes) to CSV (no headers)
+        size_t response_size = response.size();
+        std::ofstream logFile("client2_data/comm_logs.csv", std::ios_base::app);
+        logFile << roundnum << ",client2,download," << response_size << "\n";
+        logFile.close();
+
         json resp_json = json::parse(response);
 
-        if (!resp_json.contains("agg_params")) {
-            std::cerr << "[c2_decrypt] ERROR: agg_params missing in server response\n";
+        if (!resp_json.contains("metadata")) {
+            std::cerr << "[c2_decrypt] ERROR: metadata missing in server response\n";
             return 1;
         }
-        std::string b64_params = resp_json["agg_params"];
+        if (!resp_json.contains("data")) {
+            std::cerr << "[c2_decrypt] ERROR: data missing in server response\n";
+            return 1;
+        }
+
+        json metadata = resp_json["metadata"];
+        json data = resp_json["data"];
+
+        std::string b64_params;
+        if (data.contains("params")) {
+            b64_params = data["params"];
+        } else if (data.contains("agg_params")) {
+            b64_params = data["agg_params"];
+        } else {
+            std::cerr << "[c2_decrypt] ERROR: neither 'params' nor 'agg_params' present in data\n";
+            return 1;
+        }
+
+        
+        if (!data.contains("chunk_counts")) {
+            std::cerr << "[c2_decrypt] ERROR: chunk_counts missing in data\n";
+            return 1;
+        }
+        if (!data.contains("orig_sizes")) {
+            std::cerr << "[c2_decrypt] ERROR: orig_sizes missing in data\n";
+            return 1;
+        }
+
+        std::vector<size_t> chunk_counts = data["chunk_counts"].get<std::vector<size_t>>();
+        std::vector<size_t> orig_sizes = data["orig_sizes"].get<std::vector<size_t>>();
+
+        // Decode Base64 to bytes
         std::vector<uint8_t> param_bytes = Base64Decode(b64_params);
 
         std::stringstream ss;
         ss.write(reinterpret_cast<const char*>(param_bytes.data()), param_bytes.size());
 
+        // Deserialize vector of ciphertexts (chunks)
         std::vector<Ciphertext<DCRTPoly>> ciphertexts;
         Serial::Deserialize(ciphertexts, ss, SerType::BINARY);
 
-        // Decrypt w and c
-        Plaintext ptW, ptC;
-        cc->Decrypt(privKey, ciphertexts[0], &ptW);
-        cc->Decrypt(privKey, ciphertexts[1], &ptC);
+        // Sanity check: total ciphertexts should equal sum of chunk_counts
+        size_t total_chunks = 0;
+        for (size_t cnt : chunk_counts) total_chunks += cnt;
 
-        ptW->SetLength(1);
-        ptC->SetLength(1);
+        if (total_chunks != ciphertexts.size()) {
+            std::cerr << "[c2_decrypt] ERROR: mismatch between chunk_counts sum (" << total_chunks 
+                      << ") and ciphertexts size (" << ciphertexts.size() << ")\n";
+            return 1;
+        }
+        if (chunk_counts.size() != orig_sizes.size()) {
+            std::cerr << "[c2_decrypt] ERROR: chunk_counts and orig_sizes size mismatch\n";
+            return 1;
+        }
 
-        double w = ptW->GetCKKSPackedValue()[0].real();
-        double c = ptC->GetCKKSPackedValue()[0].real();
+        // Decrypt and reconstruct original arrays by concatenating each array's chunk plaintexts
+        json out_json = json::array();
+        size_t chunk_index = 0;
 
-        std::cout << "[c2_decrypt] Decrypted aggregated params: w=" << w << ", c=" << c << std::endl;
+        for (size_t layer_idx = 0; layer_idx < chunk_counts.size(); ++layer_idx) {
+            size_t count = chunk_counts[layer_idx];
+            size_t orig_size = orig_sizes[layer_idx];
 
-        // Save decrypted parameters to JSON for Python warm start
-        json out_json = {{"w", w}, {"c", c}};
+            std::vector<double> full_array;
 
+            for (size_t i = 0; i < count; ++i, ++chunk_index) {
+                Plaintext pt;
+                auto decrypt_result = cc->Decrypt(privKey, ciphertexts[chunk_index], &pt);
+                if (!decrypt_result.isValid) {
+                    std::cerr << "[c2_decrypt] ERROR: Decryption failed for ciphertext index " << chunk_index << std::endl;
+                    return 1;
+                }
+
+                pt->SetLength(pt->GetLength());
+                const auto& vals = pt->GetCKKSPackedValue();
+
+                for (const auto& val : vals) {
+                    full_array.push_back(val.real());
+                }
+            }
+
+            // Trim any trailing padded zeros before saving
+            if (full_array.size() > orig_size) {
+                full_array.resize(orig_size);
+            }
+
+            // Convert concatenated and trimmed array to JSON array
+            json arr_json = json::array();
+            for (double v : full_array) {
+                arr_json.push_back(v);
+            }
+            out_json.push_back(arr_json);
+        }
+
+        // Save decrypted aggregated weights for warm start
         std::ofstream outFile("client2_data/agg_wc.json");
         if (!outFile) {
             std::cerr << "[c2_decrypt] ERROR: could not write agg_wc.json\n";
@@ -86,12 +170,13 @@ int main() {
         outFile << out_json.dump(4);
         outFile.close();
 
-        std::cout << "[c2_decrypt] Saved decrypted aggregated params to agg_wc.json\n";
-    }
-    catch (const std::exception& e) {
+        std::cout << "[c2_decrypt] Saved decrypted aggregated weights to agg_wc.json" << std::endl;
+
+    } catch (const std::exception& e) {
         std::cerr << "[c2_decrypt] Exception: " << e.what() << std::endl;
         return 1;
     }
+
     return 0;
 }
 

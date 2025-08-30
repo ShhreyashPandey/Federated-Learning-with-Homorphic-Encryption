@@ -1,12 +1,10 @@
 # Compiler and standard flags
 CXX = g++
 CXXFLAGS = -std=c++20 -Wall -Wextra -O2 \
--I/home/shreya/libs/json-full/single_include \
--Wno-unused-parameter -Wno-unknown-pragmas \
--Wno-unused-function -Wno-sign-compare -Wno-unused-variable \
--Wno-missing-field-initializers
-
-
+  -I/home/shreya/libs/json-full/single_include \
+  -Wno-unused-parameter -Wno-unknown-pragmas \
+  -Wno-unused-function -Wno-sign-compare -Wno-unused-variable \
+  -Wno-missing-field-initializers
 
 # Include directories
 INCLUDES = \
@@ -105,5 +103,7 @@ operations: operations.cpp cc_registry.cpp $(UTIL_OBJS)
 clean:
 	rm -f *.o $(TARGETS) \
 	    *.key *.ct *.bin *.log *.json \
-	    client1_data/*.json client1_data/*.pkl client1_data/*.key client2_data/*.json client2_data/*.pkl client2_data/*.key \
+	    client1_data/*.json client1_data/*.pkl client1_data/*.key client1_data/*.h5 \
+	    client2_data/*.json client2_data/*.pkl client2_data/*.key client2_data/*.h5 \
 	    logs/*.txt logs/*.json
+

@@ -9,10 +9,11 @@
 
 #include <sstream>
 #include <vector>
+#include <iostream>
 
 using namespace lbcrypto;
 
-// Ciphertext
+// Serialize a single ciphertext to Base64 string
 std::string SerializeCiphertextToBase64(const Ciphertext<DCRTPoly>& ct) {
     std::ostringstream oss;
     Serial::Serialize(ct, oss, SerType::BINARY);
@@ -32,6 +33,7 @@ std::string SerializeCiphertextToBase64(const Ciphertext<DCRTPoly>& ct) {
     return b64;
 }
 
+// Deserialize a single ciphertext from Base64 string
 Ciphertext<DCRTPoly> DeserializeCiphertextFromBase64(const std::string& base64) {
     std::vector<uint8_t> decoded = Base64Decode(base64);
     std::string decodedStr(decoded.begin(), decoded.end());
@@ -41,7 +43,7 @@ Ciphertext<DCRTPoly> DeserializeCiphertextFromBase64(const std::string& base64) 
     return ct;
 }
 
-// Public Key 
+// Serialize PublicKey to Base64 string
 std::string SerializePublicKeyToBase64(const PublicKey<DCRTPoly>& pk) {
     std::stringstream ss;
     Serial::Serialize(pk, ss, SerType::BINARY);
@@ -53,6 +55,7 @@ std::string SerializePublicKeyToBase64(const PublicKey<DCRTPoly>& pk) {
     return Base64Encode(byteData);
 }
 
+// Deserialize PublicKey from Base64 string
 PublicKey<DCRTPoly> DeserializePublicKeyFromBase64(const std::string& base64) {
     std::vector<uint8_t> decoded = Base64Decode(base64);
     std::string decodedStr(decoded.begin(), decoded.end());
@@ -62,7 +65,7 @@ PublicKey<DCRTPoly> DeserializePublicKeyFromBase64(const std::string& base64) {
     return pk;
 }
 
-// Private Key
+// Serialize PrivateKey to Base64
 std::string SerializePrivateKeyToBase64(const PrivateKey<DCRTPoly>& sk) {
     std::stringstream ss;
     Serial::Serialize(sk, ss, SerType::BINARY);
@@ -74,6 +77,7 @@ std::string SerializePrivateKeyToBase64(const PrivateKey<DCRTPoly>& sk) {
     return Base64Encode(byteData);
 }
 
+// Deserialize PrivateKey from Base64
 PrivateKey<DCRTPoly> DeserializePrivateKeyFromBase64(const std::string& base64) {
     std::vector<uint8_t> decoded = Base64Decode(base64);
     std::string decodedStr(decoded.begin(), decoded.end());
@@ -83,7 +87,7 @@ PrivateKey<DCRTPoly> DeserializePrivateKeyFromBase64(const std::string& base64) 
     return sk;
 }
 
-// ReKey
+// Serialize EvalKey to Base64
 std::string SerializeEvalKeyToBase64(const EvalKey<DCRTPoly>& rk) {
     std::stringstream ss;
     Serial::Serialize(rk, ss, SerType::BINARY);
@@ -95,6 +99,7 @@ std::string SerializeEvalKeyToBase64(const EvalKey<DCRTPoly>& rk) {
     return Base64Encode(byteData);
 }
 
+// Deserialize EvalKey from Base64
 EvalKey<DCRTPoly> DeserializeEvalKeyFromBase64(const std::string& base64) {
     std::vector<uint8_t> decoded = Base64Decode(base64);
     std::string decodedStr(decoded.begin(), decoded.end());
@@ -104,7 +109,7 @@ EvalKey<DCRTPoly> DeserializeEvalKeyFromBase64(const std::string& base64) {
     return rk;
 }
 
-//EvalMult / EvalSum Keys
+// Serialize EvalMultKey to Base64
 std::string SerializeEvalMultKeyToBase64(const CryptoContext<DCRTPoly>& cc) {
     std::stringstream ss;
     cc->SerializeEvalMultKey(ss, SerType::BINARY, "");
@@ -116,6 +121,7 @@ std::string SerializeEvalMultKeyToBase64(const CryptoContext<DCRTPoly>& cc) {
     return Base64Encode(byteData);
 }
 
+// Serialize EvalSumKey to Base64
 std::string SerializeEvalSumKeyToBase64(const CryptoContext<DCRTPoly>& cc) {
     std::stringstream ss;
     cc->SerializeEvalSumKey(ss, SerType::BINARY);
@@ -127,8 +133,7 @@ std::string SerializeEvalSumKeyToBase64(const CryptoContext<DCRTPoly>& cc) {
     return Base64Encode(byteData);
 }
 
-
-// Serialize a vector of Ciphertext<DCRTPoly> to Base64 string
+// Serialize a vector of Ciphertext to Base64 string (e.g., multi-array weights)
 std::string SerializeCiphertextVectorToBase64(const std::vector<Ciphertext<DCRTPoly>>& cts) {
     std::stringstream ss;
     Serial::Serialize(cts, ss, SerType::BINARY);
@@ -140,7 +145,7 @@ std::string SerializeCiphertextVectorToBase64(const std::vector<Ciphertext<DCRTP
     return Base64Encode(byteData);
 }
 
-// Deserialize a Base64 string to vector of Ciphertext<DCRTPoly>
+// Deserialize Base64 string to vector of Ciphertext (multi-array)
 std::vector<Ciphertext<DCRTPoly>> DeserializeCiphertextVectorFromBase64(const std::string& base64) {
     std::vector<uint8_t> decoded = Base64Decode(base64);
     std::string decodedStr(decoded.begin(), decoded.end());
@@ -149,5 +154,4 @@ std::vector<Ciphertext<DCRTPoly>> DeserializeCiphertextVectorFromBase64(const st
     Serial::Deserialize(cts, ss, SerType::BINARY);
     return cts;
 }
-
 

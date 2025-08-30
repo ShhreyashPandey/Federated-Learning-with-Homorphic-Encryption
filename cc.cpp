@@ -40,8 +40,14 @@ int main() {
         if (config.count("ringDim"))
             params.SetRingDim(stoi(config.at("ringDim")));
 
-        if (config.count("rescaleTechnique")) {
-            std::string rescale = config.at("rescaleTechnique");
+        // Note: Use case-insensitive lookup for scaling technique key (support SCALINGTECHNIQUE as in cc_config.txt)
+        std::string scalingKey = "rescaleTechnique";
+        if (!config.count(scalingKey)) {
+            // fallback to uppercase SCALINGTECHNIQUE key
+            scalingKey = "SCALINGTECHNIQUE";
+        }
+        if (config.count(scalingKey)) {
+            std::string rescale = config.at(scalingKey);
             if (rescale == "FIXEDMANUAL")
                 params.SetScalingTechnique(lbcrypto::ScalingTechnique::FIXEDMANUAL);
             else if (rescale == "FLEXIBLEAUTO")
@@ -51,19 +57,23 @@ int main() {
             else if (rescale == "NORESCALE")
                 params.SetScalingTechnique(lbcrypto::ScalingTechnique::NORESCALE);
             else {
-                std::cerr << "[cc.cpp] Invalid rescaleTechnique in config." << std::endl;
+                std::cerr << "[cc.cpp] Invalid rescaleTechnique in config: " << rescale << std::endl;
                 return 1;
             }
         }
 
         // PRE mode — client-defined secure param
+        if (!config.count("preMode")) {
+            std::cerr << "[cc.cpp] No preMode specified in config." << std::endl;
+            return 1;
+        }
         string preModeStr = config["preMode"];
         if (preModeStr == "INDCPA")
             params.SetPREMode(INDCPA);
         else if (preModeStr == "INDCCA") // Still INDCPA internally by OpenFHE
             params.SetPREMode(INDCPA);
         else {
-            cerr << "[cc.cpp] Invalid PREMode! Use INDCPA or INDCCA." << endl;
+            cerr << "[cc.cpp] Invalid PREMode! Supported: INDCPA or INDCCA." << endl;
             return 1;
         }
 
@@ -92,3 +102,4 @@ int main() {
 
     return 0;
 }
+

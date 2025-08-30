@@ -1,90 +1,171 @@
 import pandas as pd
-import pickle
+import numpy as np
 import json
 import sys
 import requests
 import os
 import csv
-from sklearn.metrics import mean_squared_error
+import pickle
+from tensorflow.keras.models import load_model
+from sklearn.metrics import accuracy_score, roc_auc_score
 
-def test_and_post_accuracy(test_csv, model_pickle_path, accuracy_json_path, accuracy_log_csv, server_url, client_id="client2"):
-    # Load test data
+def extract_time_features(df):
+    time_parts = df['Time'].str.split(":", expand=True).astype(int)
+    df['hour'] = time_parts[0]
+    df['minute'] = time_parts[1]
+    df['second'] = time_parts[2]
+    df['seconds_since_midnight'] = df['hour']*3600 + df['minute']*60 + df['second']
+
+def extract_date_features(df):
+    date_col = pd.to_datetime(df['Date'], errors='coerce')
+    df['year'] = date_col.dt.year
+    df['month'] = date_col.dt.month
+    df['day'] = date_col.dt.day
+    df['weekday'] = date_col.dt.weekday
+    df['dayofyear'] = date_col.dt.dayofyear
+
+def preprocess_test_data(df, scaler, category_columns_path, window_size=5, use_accounts=False):
+    # Extract time and date features as done in training
+    extract_time_features(df)
+    extract_date_features(df)
+
+    # Numeric columns
+    numeric_cols = [
+        'Amount', 'seconds_since_midnight', 'hour', 'minute', 'second',
+        'year', 'month', 'day', 'weekday', 'dayofyear'
+    ]
+
+    # Categorical columns
+    categorical_cols = [
+        'Payment_type', 'Payment_currency', 'Received_currency',
+        'Sender_bank_location', 'Receiver_bank_location'
+    ]
+
+    if use_accounts:
+        categorical_cols += ['Sender_account', 'Receiver_account']
+
+    # One-hot encode categoricals
+    cat_encoded = pd.get_dummies(df[categorical_cols].astype(str))
+
+    # Load category columns saved during training and align the test set accordingly
+    with open(category_columns_path, "r") as fp:
+        cat_columns = json.load(fp)
+    cat_encoded = cat_encoded.reindex(columns=cat_columns, fill_value=0)
+
+    features = pd.concat([df[numeric_cols], cat_encoded], axis=1)
+    features = features.apply(pd.to_numeric, errors='coerce').fillna(0).astype(np.float32)
+
+    # Scale numeric columns using the loaded scaler
+    features[numeric_cols] = scaler.transform(features[numeric_cols])
+
+    X_values = features.values
+
+    # Create sliding window sequences
+    X_seq = []
+    for i in range(len(df) - window_size):
+        X_seq.append(X_values[i:i+window_size])
+    X_seq = np.array(X_seq, dtype=np.float32)
+
+    return X_seq
+
+def test_and_post_metrics(test_csv, model_h5_path, metrics_json_path, accuracy_log_csv, server_url, client_id="client2",
+                          window_size=5, use_accounts=False):
+    # Load test data CSV
     df = pd.read_csv(test_csv)
-    X = df['X'].values
-    y_true = df['y'].values
 
-    # Load trained model from pickle
+    # Load scaler from training
     try:
-        with open(model_pickle_path, 'rb') as f:
-            model = pickle.load(f)
+        with open("client2_data/scaler.pkl", "rb") as f:
+            scaler = pickle.load(f)
     except Exception as e:
-        print(f"[c2_test.py] Error loading model pickle: {e}")
+        print(f"[c2_test.py] Error loading scaler.pkl: {e}")
         return
 
-    # Predict with the model
-    y_pred = model.predict(X.reshape(-1, 1))
+    category_columns_path = "client2_data/category_columns.json"
+    if not os.path.exists(category_columns_path):
+        print(f"[c2_test.py] category_columns.json not found at {category_columns_path}")
+        return
 
-    # Calculate mean squared error
-    mse = mean_squared_error(y_true, y_pred)
+    # Check data length for sequences
+    if len(df) <= window_size:
+        print(f"[c2_test.py] Not enough data for window size {window_size}")
+        return
 
-    # Save current round number
+    # Preprocess test sequences
+    X_test = preprocess_test_data(df, scaler, category_columns_path, window_size, use_accounts=use_accounts)
+
+    # Load model from file
+    try:
+        model = load_model(model_h5_path)
+    except Exception as e:
+        print(f"[c2_test.py] Error loading model: {e}")
+        return
+
+    # Predict probabilities
+    y_pred_prob = model.predict(X_test).flatten()
+
+    # True labels adjusted for window offset
+    y_true = df['Is_laundering'].values[window_size:]
+
+    # Calculate accuracy and ROC AUC
+    y_pred_label = (y_pred_prob >= 0.5).astype(int)
+    acc = accuracy_score(y_true, y_pred_label)
+    auc = roc_auc_score(y_true, y_pred_prob)
+
+    print(f"[c2_test.py] Accuracy: {acc:.4f}, ROC AUC: {auc:.4f}")
+
+    # Read current round number
     try:
         with open("round_counter.txt", "r") as f:
-            server_round = f.read().strip()
+            round_str = f.read().strip()
+        round_num = int(round_str)
     except Exception as e:
         print(f"[c2_test.py] Could not read round_counter.txt: {e}")
-        server_round = "1"  # fallback
+        round_num = 1
 
-    try:
-        round_int = int(server_round)
-    except:
-        round_int = 1
+    # Write metrics JSON file
+    metrics = {"accuracy": acc, "auc": auc, "round": round_num}
+    with open(metrics_json_path, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    print(f"[c2_test.py] Metrics saved to {metrics_json_path}")
 
-    # Save for this round in JSON
-    with open(accuracy_json_path, 'w') as f:
-        json.dump({"accuracy": mse, "round": round_int}, f)
-
-    print(f"[c2_test.py] Test MSE: {mse}. Saved to {accuracy_json_path}")
-
-    # Append to CSV for all rounds (main log for plotting)
+    # Append metrics to CSV log
     file_exists = os.path.isfile(accuracy_log_csv)
     with open(accuracy_log_csv, 'a', newline='') as csvfile:
         writer = csv.writer(csvfile)
         if not file_exists:
-            writer.writerow(["round", "accuracy"])
-        writer.writerow([round_int, mse])
+            writer.writerow(["round", "accuracy", "auc"])
+        writer.writerow([round_num, acc, auc])
 
-    # POST request to the server
+    # POST metrics to server
     payload = {
         "client_id": client_id,
-        "round": round_int,
-        "accuracy": mse,
-        "model": "LinearRegression"
+        "round": round_num,
+        "accuracy": acc,
+        "auc": auc,
+        "model": "LSTM"
     }
-
-    # POST the accuracy JSON payload to server endpoint
     try:
         response = requests.post(server_url, json=payload)
-        print(f"[c2_test.py] POST accuracy response: Status {response.status_code}, Body: {response.text}")
+        print(f"[c2_test.py] POST response: Status {response.status_code}, Body: {response.text}")
     except requests.RequestException as e:
-        print(f"[c2_test.py] POST request failed: {e}")
+        print(f"[c2_test.py] POST failed: {e}")
 
 if __name__ == "__main__":
-    # python client2_test.py <test_csv> <model_pickle> <accuracy_json> <server_url> [<accuracy_log_csv>]
+    # Usage:
+    # python client2_test.py <test_csv> <model_h5> <metrics_json> <server_url> [<accuracy_log_csv>] [<window_size>] [<use_accounts>]
     if len(sys.argv) < 5:
-        print("Usage: python client2_test.py <test_csv> <model_pickle> <accuracy_json> <server_url> [<accuracy_log_csv>]")
+        print("Usage: python client2_test.py <test_csv> <model_h5> <metrics_json> <server_url> [<accuracy_log_csv>] [<window_size>] [<use_accounts>]")
         sys.exit(1)
 
     test_csv = sys.argv[1]
-    model_pickle = sys.argv[2]
-    accuracy_json = sys.argv[3]
+    model_h5 = sys.argv[2]
+    metrics_json = sys.argv[3]
     server_url = sys.argv[4]
+    accuracy_log_csv = sys.argv[5] if len(sys.argv) >= 6 else os.path.join(os.path.dirname(metrics_json), "accuracy_log.csv")
+    window_size = int(sys.argv[6]) if len(sys.argv) >= 7 else 5
+    use_accounts = bool(int(sys.argv[7])) if len(sys.argv) >= 8 else False
 
-    # Default CSV log path is client2_data/accuracy_log.csv
-    if len(sys.argv) >= 6:
-        accuracy_log_csv = sys.argv[5]
-    else:
-        accuracy_log_csv = os.path.join(os.path.dirname(accuracy_json), "accuracy_log.csv")
-
-    test_and_post_accuracy(test_csv, model_pickle, accuracy_json, accuracy_log_csv, server_url)
+    test_and_post_metrics(test_csv, model_h5, metrics_json, accuracy_log_csv, server_url,
+                          window_size=window_size, use_accounts=use_accounts)
 

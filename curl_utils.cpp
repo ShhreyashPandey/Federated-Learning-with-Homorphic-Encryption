@@ -65,3 +65,4 @@ std::string HttpGetJson(const std::string& url) {
     curl_slist_free_all(headers);
     return response;
 }
+

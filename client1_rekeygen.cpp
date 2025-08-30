@@ -72,7 +72,7 @@ int main() {
         postPayload["rekey"]          = rk_b64;
 
         std::string post_url = "http://localhost:8000/c2s/rekey";
-        auto post_resp = HttpPostJson(post_url, postPayload.dump()); // Fix 4
+        auto post_resp = HttpPostJson(post_url, postPayload.dump());
 
         std::cout << "[client1_rekeygen] ReKey posted to server.\n";
         std::cout << "[client1_rekeygen] Server Response: " << post_resp << std::endl;

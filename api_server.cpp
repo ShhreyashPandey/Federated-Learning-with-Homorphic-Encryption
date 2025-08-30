@@ -12,7 +12,7 @@ static void send_json(struct mg_connection* c, const std::string& data) {
     mg_printf(c,
               "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
               "Content-Length: %lu\r\n\r\n%s",
-              data.length(), data.c_str());
+              (unsigned long)data.size(), data.c_str());
 }
 
 static void send_error(struct mg_connection* c, int code, const std::string& message) {
@@ -20,11 +20,11 @@ static void send_error(struct mg_connection* c, int code, const std::string& mes
     mg_printf(c,
               "HTTP/1.1 %d ERROR\r\nContent-Type: application/json\r\n"
               "Content-Length: %lu\r\n\r\n%s",
-              code, payload.length(), payload.c_str());
+              code, (unsigned long)payload.size(), payload.c_str());
 }
 
 static std::string get_query_param(struct mg_str* query_string, const std::string& key) {
-    char buf[128] = {0};
+    char buf[1024] = {0};  // Increased buffer size for larger params if needed
     mg_get_http_var(query_string, key.c_str(), buf, sizeof(buf));
     return std::string(buf);
 }
@@ -64,14 +64,12 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
 
         if (uri == "/s2c/public_key" && method == "GET") {
             std::string client_id = get_query_param(&hm->query_string, "client_id");
-
             if (client_id.empty()) {
                 send_error(c, 400, "Missing client_id parameter");
                 return;
             }
 
             auto pk_json = storage.GetPublicKey(client_id);
-
             if (pk_json.is_null()) {
                 send_error(c, 404, "Public key not found");
                 return;
@@ -82,10 +80,8 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
         }
 
         // REKEY MANAGEMENT
-
         if (uri == "/c2s/rekey" && method == "POST") {
-            if (!payload.contains("from_client_id") || !payload.contains("to_client_id") ||
-                !payload.contains("rekey")) {
+            if (!payload.contains("from_client_id") || !payload.contains("to_client_id") || !payload.contains("rekey")) {
                 send_error(c, 400, "Missing fields in rekey JSON");
                 return;
             }
@@ -109,7 +105,6 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
             }
 
             auto rekey_json = storage.GetRekey(from, to);
-
             if (rekey_json.is_null()) {
                 send_error(c, 404, "Rekey not found");
                 return;
@@ -119,19 +114,42 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
             return;
         }
 
-        //PARAMETERs
+        // PARAMETERS MANAGEMENT (Encrypted model weights per round per client)
+        // Expect JSON payload with "metadata" and "data" keys
 
         if (uri == "/c2s/params" && method == "POST") {
-            if (!payload.contains("client_id") || !payload.contains("params") || !payload.contains("round")) {
-                send_error(c, 400, "Missing required fields in params JSON");
+            if (!payload.contains("metadata") || !payload.contains("data")) {
+                send_error(c, 400, "Missing 'metadata' or 'data' in params JSON");
+                return;
+            }
+            json metadata = payload["metadata"];
+            json data = payload["data"];
+
+            if (!metadata.contains("client_id") || !metadata.contains("round")) {
+                send_error(c, 400, "Missing client_id or round in metadata");
+                return;
+            }
+            if (!data.contains("params")) {
+                send_error(c, 400, "Missing params in data");
                 return;
             }
 
-            std::string client = payload["client_id"];
-            int round = payload["round"];
-            std::string param_b64 = payload["params"];
+            const std::string client = metadata["client_id"];
+            int round = metadata["round"];
+            const std::string params_b64 = data["params"];
 
-            storage.StoreParams(client, round, param_b64);
+            std::vector<size_t> chunk_counts;
+            if (data.contains("chunk_counts")) {
+                chunk_counts = data["chunk_counts"].get<std::vector<size_t>>();
+            }
+
+            std::vector<size_t> orig_sizes;
+            if (data.contains("orig_sizes")) {
+                orig_sizes = data["orig_sizes"].get<std::vector<size_t>>();
+            }
+
+            // Store entire Base64 encoded ciphertext vector string and chunk counts and original sizes
+            storage.StoreParams(client, round, params_b64, chunk_counts, orig_sizes);
             send_json(c, R"({"status":"params stored"})");
             return;
         }
@@ -145,8 +163,7 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
 
             int round = std::stoi(round_str);
             auto params_json = storage.GetAllParams(round);
-
-            if (params_json.is_null()) {
+            if (params_json.empty()) {
                 send_error(c, 404, "No client params found for that round");
                 return;
             }
@@ -155,6 +172,9 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
             return;
         }
 
+        // AGGREGATED PARAMETERS MANAGEMENT (Base64 encoded serialized vector of ciphertexts per client)
+        // Responses formatted with "metadata" and "data" keys
+
         if (uri == "/c2s/server/agg_params" && method == "POST") {
             if (!payload.contains("round") || !payload.contains("agg_params")) {
                 send_error(c, 400, "Missing fields in aggregated params JSON");
@@ -162,7 +182,7 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
             }
 
             int round = payload["round"];
-            json agg_params_map = payload["agg_params"];  // { client1: base64, client2: base64 }
+            json agg_params_map = payload["agg_params"];  // { client1: base64_vec, client2: base64_vec, ... }
 
             storage.StoreAggregatedParams(round, agg_params_map);
             send_json(c, R"({"status":"aggregated params stored"})");
@@ -179,20 +199,39 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
 
             int round = std::stoi(round_str);
             auto agg = storage.GetAggregatedParam(client_id, round);
-            if (agg.empty()) {
+            if (agg.is_null() || agg.empty()) {
                 send_error(c, 404, "No aggregated param found");
                 return;
             }
 
-            send_json(c, agg.dump());
+            auto chunk_counts = storage.GetChunkCounts(client_id, round);
+            auto orig_sizes = storage.GetOrigSizes(client_id, round); // << Added retrieval of original sizes
+
+            // Wrap response in "metadata" and "data"
+            json response_json = {
+                {"metadata", {
+                    {"client_id", client_id},
+                    {"round", round}
+                }},
+                {"data", {
+                    {"agg_params", agg["agg_params"]}
+                }}
+            };
+
+            if (!chunk_counts.empty()) {
+                response_json["data"]["chunk_counts"] = chunk_counts;
+            }
+            if (!orig_sizes.empty()) {
+                response_json["data"]["orig_sizes"] = orig_sizes; // << Added original sizes in response
+            }
+
+            send_json(c, response_json.dump());
             return;
         }
 
-        //RESULTS
-
+        // RESULTS MANAGEMENT (Accuracy/Metrics)
         if (uri == "/c2s/result" && method == "POST") {
-            if (!payload.contains("client_id") || !payload.contains("round") ||
-                !payload.contains("accuracy") || !payload.contains("model")) {
+            if (!payload.contains("client_id") || !payload.contains("round") || !payload.contains("accuracy") || !payload.contains("model")) {
                 send_error(c, 400, "Missing fields in result JSON");
                 return;
             }
@@ -218,7 +257,6 @@ static void handle_request(struct mg_connection* c, int ev, void* ev_data) {
 
             int round = std::stoi(round_str);
             auto res = storage.GetResult(client_id, round);
-
             if (res.is_null()) {
                 send_error(c, 404, "Result not found");
                 return;
