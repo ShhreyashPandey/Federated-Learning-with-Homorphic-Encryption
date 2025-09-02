@@ -3,7 +3,7 @@
 ## 📌 Project Overview
 This repository contains the full implementation of our research work:  
 **“Privacy-Preserving Federated Learning with Homomorphic Encryption”**,  
-developed by **Ishaan Nikhil Deshpande** and **Shhreyash Pandey**, under the guidance of **Mr. Puneet Bakshi (CDAC Pune)**.
+developed by **Ishaan Nikhil Deshpande** and **Shhreyash Pandey**, under the guidance of **Dr. Puneet Bakshi (CDAC Pune)**.
 
 The project integrates **Federated Learning (FL)** with **Homomorphic Encryption (HE)** using the **CKKS scheme** and **Proxy Re-Encryption (PRE)**.  
 It ensures that model updates remain encrypted throughout the training process, enabling secure aggregation by the server **without ever accessing raw data**.
@@ -179,7 +179,7 @@ python3 graph_plots.py
 
 * Ishaan Nikhil Deshpande – Dept. of AIML, SIT Pune
 * Shhreyash Pandey – Dept. of AIML, SIT Pune
-* Supervisor: Mr. Puneet Bakshi – CDAC Pune
+* Supervisor: Dr. Puneet Bakshi – CDAC Pune
 
 ---
 
