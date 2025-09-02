@@ -10,6 +10,10 @@ It ensures that model updates remain encrypted throughout the training process, 
 
 Our experiments on a **financial fraud detection dataset** using an **LSTM model** demonstrate that encrypted federated learning achieves **comparable accuracy to plaintext FL**, while providing **robust protection against inference attacks and privacy leakage**.
 
+VIDEO EXPLANATION - 
+
+https://drive.google.com/file/d/1yo0denaAVPKgOS83jG-Xy9-7qJqz-zgq/view?usp=drivesdk
+
 ---
 
 ## 🎯 Objectives
